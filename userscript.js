@@ -2,10 +2,10 @@
 // @name         GeoFS-Flightradar-receiver
 // @namespace    http://tampermonkey.net/
 // @version      1.9.3
-// @description  for this update, just checking if the version thing works
-// @match http://*/geofs.php*
-// @match https://*/geofs.php*
-// @updateURL   https://github.com/seabus0316/GeoFS-flightradar/raw/refs/heads/main/user.js
+// @description  flightradar sender with editable callsign + flight info
+// @match        http://*/geofs.php*
+// @match        https://*/geofs.php*
+// @updateURL    https://github.com/seabus0316/GeoFS-flightradar/raw/refs/heads/main/user.js
 // @grant        none
 // ==/UserScript==
 
@@ -21,30 +21,30 @@
     console.log('[ATC-Reporter]', ...args);
   }
 
-  // --- 全域變數 ---
+  // --- NEW: manual Callsign variable ---
+  let mainCallsign = "NICO";   // default
   let flightInfo = { departure: '', arrival: '', flightNo: '', squawk: '' };
   let flightUI;
   let wasOnGround = true;
   let takeoffTimeUTC = '';
-    // ======= Update check (English) =======
+
+  // ===== Update check =====
   const CURRENT_VERSION = '1.9.3';
   const VERSION_JSON_URL = 'https://raw.githubusercontent.com/seabus0316/GeoFS-flightradar/main/version.json';
   const UPDATE_URL = 'https://raw.githubusercontent.com/seabus0316/GeoFS-flightradar/main/userscript.js';
-(function checkUpdate() {
-  fetch(VERSION_JSON_URL)
-    .then(r => r.json())
-    .then(data => {
-      if (data.version && data.version !== CURRENT_VERSION) {
-        showModal(
-          `🚩 GeoFS flightradar receiver new version available (${data.version})!<br>Please reinstall the latest user.js from GitHub.`,
-          null,
-          UPDATE_URL
-        );
-      }
-    })
-    .catch(() => {});
-})();
-  // --- WebSocket 管理 ---
+
+  (function checkUpdate() {
+    fetch(VERSION_JSON_URL)
+      .then(r => r.json())
+      .then(data => {
+        if (data.version && data.version !== CURRENT_VERSION) {
+          showToast("⚠ Update available: " + data.version);
+        }
+      })
+      .catch(() => {});
+  })();
+
+  // --- WebSocket ---
   let ws;
   function connect() {
     try {
@@ -76,14 +76,17 @@
     }
   }
 
-  // --- 工具函式 ---
+  // ==== helpers ====
   function getAircraftName() {
-    return geofs?.aircraft?.instance?.aircraftRecord?.name || 'Unknown';
+    return geofs?.aircraft?.instance?.aircraftRecord?.name || 'Unkown';
   }
+
+  // ---- NEW: callsign function ----
   function getPlayerCallsign() {
-    return geofs?.userRecord?.callsign || 'Unknown';
+    return mainCallsign?.trim() || "UNKOWN";
   }
-  // --- AGL 計算 ---
+
+  // --- AGL ---
   function calculateAGL() {
     try {
       const altitudeMSL = geofs?.animation?.values?.altitude;
@@ -96,7 +99,8 @@
         aircraft?.collisionPoints?.length >= 2 &&
         typeof aircraft.collisionPoints[aircraft.collisionPoints.length - 2]?.worldPosition?.[2] === 'number'
       ) {
-        const collisionZFeet = aircraft.collisionPoints[aircraft.collisionPoints.length - 2].worldPosition[2] * 3.2808399;
+        const collisionZFeet =
+          aircraft.collisionPoints[aircraft.collisionPoints.length - 2].worldPosition[2] * 3.2808399;
         return Math.round((altitudeMSL - groundElevationFeet) + collisionZFeet);
       }
     } catch (err) {
@@ -105,33 +109,26 @@
     return null;
   }
 
-  // --- 起飛偵測 ---
   function checkTakeoff() {
     const onGround = geofs?.aircraft?.instance?.groundContact ?? true;
     if (wasOnGround && !onGround) {
       takeoffTimeUTC = new Date().toISOString();
-      console.log('[ATC-Reporter] Takeoff at', takeoffTimeUTC);
     }
     wasOnGround = onGround;
   }
 
-  // --- 擷取飛行狀態 ---
   function readSnapshot() {
     try {
       const inst = geofs?.aircraft?.instance;
       if (!inst) return null;
 
-      const lla = inst.llaLocation || [];
-      const lat = lla[0];
-      const lon = lla[1];
-      const altMeters = lla[2];
+      const [lat, lon, altMeters] = inst.llaLocation || [];
+      if (typeof lat !== "number") return null;
 
-      if (typeof lat !== 'number' || typeof lon !== 'number') return null;
-
-      const altMSL = (typeof altMeters === 'number') ? altMeters * 3.28084 : geofs?.animation?.values?.altitude ?? 0;
+      const altMSL = (typeof altMeters === 'number') ? altMeters * 3.28084 : 0;
       const altAGL = calculateAGL();
       const heading = geofs?.animation?.values?.heading360 ?? 0;
-      const speed =  geofs.animation.values.kias ? geofs.animation.values.kias.toFixed(1) : 'N/A';
+      const speed = geofs?.animation?.values?.kias || 0;
 
       return { lat, lon, altMSL, altAGL, heading, speed };
     } catch (e) {
@@ -140,84 +137,83 @@
     }
   }
 
-  // --- 組裝 payload ---
-function buildPayload(snap) {
-  checkTakeoff();
-  let flightPlan = [];
-  try {
-    if (geofs.flightPlan && typeof geofs.flightPlan.export === "function") {
-      flightPlan = geofs.flightPlan.export();
-    }
-  } catch (e) {}
- const userId = geofs?.userRecord?.id || null;
-  return {
-    id: getPlayerCallsign(),
-    callsign: getPlayerCallsign(),
-    type: getAircraftName(),
-    lat: snap.lat,
-    lon: snap.lon,
-    alt: (typeof snap.altAGL === 'number') ? snap.altAGL : Math.round(snap.altMSL || 0),
-    altMSL: Math.round(snap.altMSL || 0),
-    heading: Math.round(snap.heading || 0),
-    speed: Math.round(snap.speed || 0),
-    flightNo: flightInfo.flightNo,
-    departure: flightInfo.departure,
-    arrival: flightInfo.arrival,
-    takeoffTime: takeoffTimeUTC,
-    squawk: flightInfo.squawk,
-    flightPlan: flightPlan,
-    nextWaypoint: geofs.flightPlan?.trackedWaypoint?.ident || null,  // ← 加這行
-    userId: userId  // ← 添加這行
-  };
-}
+  function buildPayload(snap) {
+    checkTakeoff();
 
-  // --- 定期傳送 ---
+    let flightPlan = [];
+    try {
+      if (geofs.flightPlan?.export) {
+        flightPlan = geofs.flightPlan.export();
+      }
+    } catch {}
+
+    return {
+      id: getPlayerCallsign(),
+      callsign: getPlayerCallsign(),
+      type: getAircraftName(),
+      lat: snap.lat,
+      lon: snap.lon,
+      alt: typeof snap.altAGL === "number" ? snap.altAGL : Math.round(snap.altMSL),
+      altMSL: Math.round(snap.altMSL),
+      heading: Math.round(snap.heading),
+      speed: Math.round(snap.speed),
+      flightNo: flightInfo.flightNo,
+      departure: flightInfo.departure,
+      arrival: flightInfo.arrival,
+      takeoffTime: takeoffTimeUTC,
+      squawk: flightInfo.squawk,
+      flightPlan,
+      nextWaypoint: geofs.flightPlan?.trackedWaypoint?.ident || null,
+      userId: geofs?.userRecord?.id || null
+    };
+  }
+
+  // send loop
   setInterval(() => {
     if (!ws || ws.readyState !== 1) return;
     const snap = readSnapshot();
     if (!snap) return;
-    const payload = buildPayload(snap);
-    safeSend({ type: 'position_update', payload });
+    safeSend({ type: 'position_update', payload: buildPayload(snap) });
   }, SEND_INTERVAL_MS);
 
-  // --- Toast 提示 ---
+  // toast
   function showToast(msg) {
-    const toast = document.createElement('div');
-    toast.textContent = msg;
-    toast.style.position = 'fixed';
-    toast.style.bottom = '20px';
-    toast.style.right = '20px';
-    toast.style.background = 'rgba(0,0,0,0.8)';
-    toast.style.color = '#fff';
-    toast.style.padding = '8px 12px';
-    toast.style.borderRadius = '6px';
-    toast.style.fontSize = '13px';
-    toast.style.zIndex = 1000000;
-    toast.style.opacity = '0';
-    toast.style.transition = 'opacity 0.3s ease';
-    document.body.appendChild(toast);
-    requestAnimationFrame(() => { toast.style.opacity = '1'; });
+    const t = document.createElement('div');
+    t.textContent = msg;
+    t.style.position = 'fixed';
+    t.style.bottom = '20px';
+    t.style.right = '20px';
+    t.style.background = 'rgba(0,0,0,0.85)';
+    t.style.color = '#fff';
+    t.style.padding = '8px 12px';
+    t.style.borderRadius = '6px';
+    t.style.zIndex = 999999;
+    t.style.fontSize = '13px';
+    t.style.opacity = '0';
+    t.style.transition = '.3s';
+    document.body.appendChild(t);
+    requestAnimationFrame(() => t.style.opacity = '1');
     setTimeout(() => {
-      toast.style.opacity = '0';
-      setTimeout(() => toast.remove(), 300);
+      t.style.opacity = '0';
+      setTimeout(() => t.remove(), 300);
     }, 2000);
   }
 
-  // --- UI 注入 ---
+  // === UI ===
   function injectFlightUI() {
     flightUI = document.createElement('div');
-    flightUI.id = 'flightInfoUI';
     flightUI.style.position = 'fixed';
     flightUI.style.bottom = '280px';
     flightUI.style.right = '6px';
     flightUI.style.background = 'rgba(0,0,0,0.6)';
     flightUI.style.padding = '8px';
     flightUI.style.borderRadius = '6px';
-    flightUI.style.color = 'white';
+    flightUI.style.color = '#fff';
     flightUI.style.fontSize = '12px';
     flightUI.style.zIndex = 999999;
 
     flightUI.innerHTML = `
+      <div>CS: <input id="csInput" style="width:60px"></div>
       <div>Dep: <input id="depInput" style="width:60px"></div>
       <div>Arr: <input id="arrInput" style="width:60px"></div>
       <div>Flt#: <input id="fltInput" style="width:60px"></div>
@@ -227,12 +223,18 @@ function buildPayload(snap) {
 
     document.body.appendChild(flightUI);
 
-    // 讓輸入框自動轉大寫
-    ['depInput','arrInput','fltInput','sqkInput'].forEach(id => {
+    // uppercase
+    ["csInput","depInput","arrInput","fltInput","sqkInput"].forEach(id => {
       const el = document.getElementById(id);
-      el.addEventListener('input', () => {
+      el.addEventListener("input", () => {
         el.value = el.value.toUpperCase();
       });
+    });
+
+    // callsign update
+    document.getElementById("csInput").addEventListener("input", () => {
+      mainCallsign = document.getElementById("csInput").value.trim().toUpperCase();
+      showToast("Callsign = " + mainCallsign);
     });
 
     document.getElementById('saveBtn').onclick = () => {
@@ -240,35 +242,23 @@ function buildPayload(snap) {
       flightInfo.arrival = document.getElementById('arrInput').value.trim();
       flightInfo.flightNo = document.getElementById('fltInput').value.trim();
       flightInfo.squawk = document.getElementById('sqkInput').value.trim();
-      showToast('Flight info saved!');
+      showToast('Flight info saved');
     };
   }
   injectFlightUI();
 
-  // --- 快捷鍵 W 收合 UI ---
+  // toggle with W
   document.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 'w') {
-      if (flightUI.style.display === 'none') {
-        flightUI.style.display = 'block';
-        showToast('Flight Info UI Shown');
-      } else {
-        flightUI.style.display = 'none';
-        showToast('Flight Info UI Hidden');
-      }
+      flightUI.style.display =
+        flightUI.style.display === 'none' ? 'block' : 'none';
+      showToast(flightUI.style.display === 'none' ? 'UI Hidden' : 'UI Shown');
     }
   });
 
-  // --- 關閉所有 input 的 autocomplete ---
-  document.querySelectorAll("input").forEach(el => {
-    el.setAttribute("autocomplete", "off");
-  });
-
-  // --- 防止 input 觸發 GeoFS hotkey ---
+  // stop GeoFS hotkey when typing
   document.addEventListener("keydown", (e) => {
-    const target = e.target;
-    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") {
-      e.stopPropagation();
-    }
+    if (e.target.tagName === "INPUT") e.stopPropagation();
   }, true);
 
 })();
